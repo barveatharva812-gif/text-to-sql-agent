@@ -33,17 +33,14 @@ if not api_key:
 
 client = Groq(api_key=api_key)
 
-# Chat history lives in session_state so it survives across reruns
-# (Streamlit reruns the whole script on every interaction).
 if "history" not in st.session_state:
-    st.session_state.history = []  # list of {"question", "sql", "answer"}
+    st.session_state.history = []
 
 if st.sidebar.button("🗑️ Clear conversation"):
     st.session_state.history = []
     st.rerun()
 
 
-# ---------- Helpers ----------
 def get_schema() -> str:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -54,19 +51,11 @@ def get_schema() -> str:
 
 
 def is_safe_query(sql: str) -> bool:
-    """Only allow read-only SELECT queries. Blocks writes/deletes as a guardrail."""
     forbidden = r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|ATTACH|REPLACE)\b"
     return sql.strip().upper().startswith("SELECT") and not re.search(forbidden, sql, re.IGNORECASE)
 
 
 def validate_query(sql: str):
-    """
-    Checks whether SQLite considers this query valid WITHOUT actually
-    running it. SQLite's query planner raises the same 'no such
-    column/table' errors here as it would on execution, so this catches
-    mistakes cheaply before we touch real data.
-    Returns (is_valid, error_message_or_None).
-    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     try:
@@ -97,7 +86,6 @@ A: SELECT p.category, SUM(p.price * oi.quantity) AS revenue
 
 
 def build_history_context() -> str:
-    """Turns the last few Q&A pairs into text the model can use for follow-ups."""
     recent = st.session_state.history[-HISTORY_TURNS:]
     if not recent:
         return ""
@@ -109,10 +97,6 @@ def build_history_context() -> str:
 
 
 def generate_sql(question: str, schema: str, feedback: str = None) -> str:
-    """
-    Generates SQL for a question. If `feedback` is given (an error from a
-    previous attempt), the model is asked to fix that specific problem.
-    """
     system_prompt = f"""You are a SQL expert. Given a database schema, a
 conversation history, and a question in plain English, write a single
 SQLite SELECT query that answers it.
@@ -159,11 +143,6 @@ def run_query(sql: str):
 
 
 def generate_sql_with_retry(question: str, schema: str):
-    """
-    Generates SQL, validates it (without running), and if invalid or the
-    real execution fails, feeds the error back to the model and retries.
-    Returns (final_sql, columns, rows, attempt_log).
-    """
     attempt_log = []
     feedback = None
 
@@ -176,7 +155,6 @@ def generate_sql_with_retry(question: str, schema: str):
             attempt_log[-1]["error"] = "Not a read-only SELECT query."
             raise ValueError("Generated query failed the safety check.")
 
-        # Validate BEFORE running -- catches typos/bad columns cheaply.
         valid, val_error = validate_query(sql)
         if not valid:
             attempt_log[-1]["stage"] = "validation"
@@ -218,14 +196,14 @@ Explain this result in 1-3 plain-English sentences. Be concise and direct."""
 # ---------- UI ----------
 if not os.path.exists(DB_PATH):
     # On Streamlit Cloud the .db file isn't in git (it's generated data),
-    # so build it automatically on first run instead of erroring out.
-    import subprocess
-    subprocess.run(["python", "setup_database.py"], check=True)
+    # so build it automatically on first run. We import and call the
+    # setup script directly instead of shelling out, since the "python"
+    # command isn't guaranteed to exist on the server.
+    import setup_database  # noqa: F401 (running this module builds the .db file)
 
 with st.expander("📋 View database schema"):
     st.code(get_schema(), language="sql")
 
-# Replay the conversation so far as chat bubbles
 for turn in st.session_state.history:
     with st.chat_message("user"):
         st.write(turn["question"])
@@ -266,7 +244,6 @@ if question:
                 answer = "Query ran successfully but returned no rows."
                 st.info(answer)
 
-            # Save this turn so future questions can refer back to it.
             st.session_state.history.append({"question": question, "sql": sql, "answer": answer})
 
         except sqlite3.Error as e:
